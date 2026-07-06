@@ -38,7 +38,7 @@ func main() {
 
 	// 3. Initialize Layers
 	ledgerStore := store.NewLedgerStore(dbPool)
-	handler := api.NewHandler(ledgerStore)
+	handler := api.NewHandler(ledgerStore, cfg.Env)
 
 	// 4. Setup Router
 	r := mux.NewRouter()
@@ -53,9 +53,16 @@ func main() {
 
 	// API V1
 	v1 := r.PathPrefix("/api/v1").Subrouter()
+	v1.HandleFunc("/accounts", handler.ListAccounts).Methods("GET")
 	v1.HandleFunc("/accounts", handler.CreateAccount).Methods("POST")
 	v1.HandleFunc("/accounts/{id}", handler.GetAccount).Methods("GET")
+	v1.HandleFunc("/transfers", handler.ListTransfers).Methods("GET")
 	v1.HandleFunc("/transfers", handler.CreateTransfer).Methods("POST")
+	v1.HandleFunc("/transfers/{id}", handler.GetTransfer).Methods("GET")
+	v1.HandleFunc("/integrity", handler.Integrity).Methods("GET")
+	v1.HandleFunc("/demo/reset", handler.ResetDemo).Methods("POST")
+	v1.HandleFunc("/demo/seed", handler.SeedDemo).Methods("POST")
+	v1.HandleFunc("/demo/scenarios/hotspot", handler.HotspotScenario).Methods("POST")
 
 	// 5. Start Server
 	srv := &http.Server{

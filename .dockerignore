@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+.idea
+.vscode
+
+tmp
+coverage.out
+
+web/node_modules
+web/dist
+
+*.log

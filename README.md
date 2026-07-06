@@ -1,136 +1,177 @@
-# LedgerOps
+# LedgerOps Workbench
 
-A distributed ledger system built to answer one question: what does it actually take to make money move correctly?
+LedgerOps Workbench is an interactive reliability lab for a Go/PostgreSQL ledger service. It shows how transfers behave under client retries, lock contention, and database-enforced accounting invariants.
 
-Not "correctly under normal conditions" — correctly when clients retry, when the network lies, when two transfers touch the same accounts at the same time, and when the application layer makes a mistake. The guarantees in this system live at the database level, not in application code that can be bypassed, miscalled, or partially executed.
-
-This is my MS thesis project at CSUDH. The paper is titled *Transactional Correctness and Concurrency Control in Distributed Ledger Systems*.
+The system is built around a simple money-movement contract: every accepted transfer must be idempotent, deadlock-resistant, balance-preserving, and auditable from database state.
 
 ---
 
-## The Problems This Solves
+## Core Guarantees
 
-Most ledger implementations handle the happy path well. The interesting questions are:
+**Safe retries**
+Each transfer request requires an `Idempotency-Key` header. The API hashes the full request payload and stores the completed response. A later request with the same key and same payload returns the original transfer with HTTP `200`. A later request with the same key and a different payload is rejected.
 
-**What prevents a deadlock when two transfers touch the same accounts in opposite order?**
-A naive implementation locks accounts in arrival order. Two concurrent transfers — A→B and B→A — deadlock immediately. This system enforces deterministic lock acquisition order by sorting account IDs before locking. The deadlock is structurally impossible.
+**Deterministic locking**
+Transfers lock account rows in sorted account-ID order. Opposite-direction transfers, such as account 1 to account 2 and account 2 to account 1, acquire locks in the same order and avoid circular waits.
 
-**What prevents double-entry invariants from being violated by a bug in application code?**
-Application-level checks can be bypassed. A direct SQL insert, a missed validation branch, or a partial rollback can all corrupt the ledger. This system enforces the double-entry constraint via a `DEFERRABLE` constraint trigger — the database itself refuses any transaction that would leave debits and credits unbalanced, regardless of how the write arrived.
+**Fast contention failure**
+The transfer coordinator uses `SELECT FOR UPDATE NOWAIT`. When hot accounts are already locked, the request fails with HTTP `409` instead of waiting behind contention and consuming database connections.
 
-**What prevents a client retry from processing a transfer twice?**
-Idempotency keys alone are insufficient if they can collide or be generated inconsistently. This system uses SHA-256 hashing of the full request payload as the idempotency key, maintained in a state machine that tracks whether a request is pending, completed, or failed. A retry with the same payload returns the original result. A different payload with a collision is structurally impossible.
+**Database-enforced accounting integrity**
+Ledger entries are double-entry records. A deferrable PostgreSQL constraint trigger rejects any transfer whose ledger-entry deltas do not sum to zero at commit time. Account balances also carry a database check constraint preventing negative balances.
 
 ---
 
-## Design Decisions
+## Workbench
 
-Full reasoning in [`/docs/adr/`](./docs/adr/). Summary:
+The React/Vite app in `web/` is the primary interface for exercising the ledger service.
 
-| Decision | What was chosen | Why not the alternative |
+It supports five scenarios:
+
+| Scenario | Behavior |
+|---|---|
+| Normal transfer | Creates one completed transfer and shows the debit and credit entries |
+| Retry after timeout | Submits the same payload twice with the same idempotency key and shows the second request as a `200` replay |
+| Opposite direction race | Fires transfers between the same two accounts in opposite directions |
+| Hot merchant contention | Sends concurrent requests against hot accounts and surfaces `409` conflicts |
+| Invariant audit | Reads database state and reports negative balances, malformed transfers, and unbalanced transfers |
+
+The screen is organized as an operational workbench:
+
+| Region | Purpose |
+|---|---|
+| Scenario rail | Starts transfer, replay, contention, and audit workflows |
+| Transaction timeline | Shows request IDs, idempotency keys, statuses, account routes, amounts, and durations |
+| Ledger truth panel | Shows account balances, selected transfer details, ledger entries, and invariant results |
+| Counter strip | Summarizes successful transfers, replays, conflicts, errors, and abort rate |
+
+---
+
+## API
+
+Base path: `/api/v1`
+
+| Method | Path | Purpose |
 |---|---|---|
-| Concurrency control | Pessimistic locking with deterministic account ID ordering | Optimistic concurrency shifts deadlock risk to retry storms under contention |
-| Invariant enforcement | `DEFERRABLE` constraint trigger at the database level | Application-level checks can be bypassed by any direct database write |
-| Idempotency | SHA-256 request hashing + state machine | UUID keys require the client to generate and track them; hash is derived from payload |
-| Contention behavior | `SELECT FOR UPDATE NOWAIT` — fail fast | Waiting under contention exhausts the connection pool; fail fast and let the caller retry |
+| `POST` | `/accounts` | Create an account |
+| `GET` | `/accounts` | List accounts |
+| `GET` | `/accounts/{id}` | Read one account |
+| `POST` | `/transfers` | Execute an idempotent transfer |
+| `GET` | `/transfers` | List recent transfers |
+| `GET` | `/transfers/{id}` | Read one transfer with ledger entries |
+| `GET` | `/integrity` | Run invariant checks against database state |
+| `POST` | `/demo/reset` | Reset demo data in development/demo environments |
+| `POST` | `/demo/seed` | Seed demo accounts in development/demo environments |
+| `POST` | `/demo/scenarios/hotspot` | Run a concurrent hotspot scenario in development/demo environments |
+
+Demo mutation endpoints are enabled only when `ENVIRONMENT` is `development` or `demo`.
+
+---
+
+## Running Locally
+
+Requires Go 1.21+, PostgreSQL, and Node.js. The provided Docker Compose file can start PostgreSQL plus observability services.
+
+```bash
+# Start database and supporting services
+docker compose up -d
+
+# Run migrations
+make migrate-up
+
+# Start API on localhost:8080
+make run
+```
+
+Start the Workbench in a second terminal:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173/`. Vite proxies `/api` requests to `http://127.0.0.1:8080`.
+
+---
+
+## Transfer Example
+
+```bash
+curl -i \
+  -X POST http://localhost:8080/api/v1/transfers \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: transfer-001" \
+  -d '{"from_account_id":1,"to_account_id":2,"amount":100}'
+```
+
+A new transfer returns HTTP `201`. Repeating the same command returns HTTP `200` with the stored response.
 
 ---
 
 ## Benchmarks
 
-Tested under two load profiles using [pgbench / custom load harness — *add your tooling*].
+The benchmark harness in `cmd/benchmark` supports uniform and hotspot workloads.
 
-| Load profile | TPS | Invariant violations | Notes |
-|---|---|---|---|
-| Uniform load | 359 | 0 / 16,000+ requests | Deadlock-free across all concurrent transfers |
-| Hotspot load | — | 0 | 66% abort rate — correct consistency-over-availability behavior |
+```bash
+make benchmark-uniform
+make benchmark-hotspot
+```
 
-The 66% abort rate under hotspot load is intentional and correct. When two transfers contend for the same accounts, one aborts immediately via `NOWAIT` rather than waiting. The caller retries. The invariants hold. This is the right tradeoff for a financial system.
+Representative results from the included JSON artifacts:
+
+| Load profile | Throughput | Conflict abort rate | Integrity violations |
+|---|---:|---:|---:|
+| Uniform | 359 TPS | 0% | 0 |
+| Hotspot | Contention-limited | 66% | 0 |
+
+High abort rates under hotspot load are expected. They indicate that locked hot accounts reject excess concurrent work quickly while preserving ledger invariants.
 
 ---
 
 ## Architecture
 
-```
-Client
-  │
-  ▼
+```text
+Client or Workbench
+  |
+  v
 HTTP API (Go)
-  │
-  ├── Idempotency layer
-  │     SHA-256(request) → check state machine
-  │     If seen: return stored result
-  │     If new: proceed
-  │
-  ▼
+  |
+  +-- Idempotency layer
+  |     SHA-256(request body) + Idempotency-Key
+  |     completed match -> stored response
+  |     mismatched payload -> rejection
+  |
+  v
 Transfer coordinator
-  │
-  ├── Sort account IDs (deterministic lock order)
-  │
-  ▼
+  |
+  +-- Sort account IDs for deterministic lock order
+  +-- Lock account rows with SELECT FOR UPDATE NOWAIT
+  +-- Insert transfer intent
+  +-- Insert debit and credit ledger entries
+  +-- Update account balances
+  |
+  v
 PostgreSQL
-  ├── SELECT FOR UPDATE NOWAIT on both accounts
-  ├── Debit source, credit destination
-  ├── DEFERRABLE trigger checks: sum(debits) = sum(credits)
-  └── Commit or rollback
-```
-
----
-
-## Running It
-
-Requires Docker and Go 1.21+.
-
-```bash
-git clone https://github.com/punchamoorthee/ledgerops
-cd ledgerops
-
-# Start Postgres
-docker compose up -d
-
-# Run migrations
-make migrate
-
-# Start the server
-make run
-```
-
-The server runs on `localhost:8080`. See [`/docs/api.md`](./docs/api.md) for endpoint reference.
-
-To run the benchmark suite:
-
-```bash
-make bench
+  +-- balance >= 0 check constraint
+  +-- deferrable ledger sum trigger
+  +-- transaction commit or rollback
 ```
 
 ---
 
 ## Repository Structure
 
+```text
+cmd/api          HTTP API entry point
+cmd/benchmark    Load generator for uniform and hotspot workloads
+cmd/seeder       Account seeding utility
+db/migrations    PostgreSQL schema and invariant trigger
+internal/api     HTTP handlers, demo scenarios, and response mapping
+internal/config  Environment configuration
+internal/domain  Shared API and ledger models
+internal/store   PostgreSQL transfer, query, demo, and integrity logic
+web              React/Vite Workbench UI
+analysis         Plotting utilities for benchmark artifacts
 ```
-/cmd          Entry point
-/internal
-  /ledger     Core transfer logic and coordinator
-  /idempotency  State machine and request hashing
-  /db         Migrations and query layer
-/docs
-  /adr        Architectural decision records
-  api.md      API reference
-```
 
----
-
-## What's Next
-
-Extending to two nodes with two-phase commit. The existing guarantees — the trigger, the idempotency layer, the locking — hold within a single Postgres instance. They break in specific and instructive ways when the coordinator and the data live on separate nodes. That work is in progress and will be documented here and on [my Substack](https://punchamoorthee.substack.com) as it breaks.
-
----
-
-## Thesis
-
-*LedgerOps — Transactional Correctness and Concurrency Control in Distributed Ledger Systems*
-California State University, Dominguez Hills · May 2026
-
----
-
-*Questions about the design decisions or the benchmarks: open an issue or reach out at punchamoorthee@gmail.com.*

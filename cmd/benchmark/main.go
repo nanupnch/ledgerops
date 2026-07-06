@@ -61,10 +61,7 @@ func worker(wg *sync.WaitGroup, start time.Time) {
 	for time.Since(start) < duration {
 		from, to := generateAccounts()
 		amount := int64(100)
-
-		// Generate Idempotency Key
-		// For high contention, we might intentionally reuse keys, but for standard throughput
-		// we usually want unique requests.
+		// Generate a unique idempotency key for each benchmark request.
 		key := fmt.Sprintf("bench-%d-%d-%d", from, to, time.Now().UnixNano())
 
 		payload := map[string]interface{}{

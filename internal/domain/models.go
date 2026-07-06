@@ -43,6 +43,7 @@ type LedgerEntry struct {
 type TransferResponse struct {
 	Transfer Transfer      `json:"transfer"`
 	Entries  []LedgerEntry `json:"entries"`
+	Replayed bool          `json:"replayed"`
 }
 
 // IdempotencyPayload stores the response state for exact-once delivery.
@@ -50,4 +51,18 @@ type IdempotencyPayload struct {
 	Status         string          `json:"status"`
 	ResponseBody   json.RawMessage `json:"response_body,omitempty"`
 	ResponseStatus int             `json:"response_status,omitempty"`
+}
+
+type TransferIntegrityIssue struct {
+	TransferID int64 `json:"transfer_id"`
+	EntryCount int64 `json:"entry_count"`
+	SumDelta   int64 `json:"sum_delta"`
+}
+
+type IntegrityReport struct {
+	OK                  bool                     `json:"ok"`
+	NegativeBalances    int64                    `json:"negative_balances"`
+	UnbalancedTransfers []TransferIntegrityIssue `json:"unbalanced_transfers"`
+	MalformedTransfers  []TransferIntegrityIssue `json:"malformed_transfers"`
+	CheckedAt           time.Time                `json:"checked_at"`
 }

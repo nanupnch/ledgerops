@@ -1,4 +1,4 @@
-.PHONY: build run seed benchmark clean docker-up docker-down
+.PHONY: build run seed benchmark clean docker-up docker-down web-install web-dev web-build
 
 # Binary Names
 API_BIN=bin/api
@@ -13,6 +13,18 @@ build:
 	@go build -o $(API_BIN) ./cmd/api
 	@go build -o $(BENCH_BIN) ./cmd/benchmark
 	@go build -o $(SEED_BIN) ./cmd/seeder
+
+run: build
+	@DB_SOURCE="$(DB_URL)" ENVIRONMENT=development ./$(API_BIN)
+
+web-install:
+	@cd web && npm install
+
+web-dev:
+	@cd web && npm run dev
+
+web-build:
+	@cd web && npm run build
 
 docker-up:
 	@docker-compose up -d --build
