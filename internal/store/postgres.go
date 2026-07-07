@@ -94,10 +94,16 @@ func (s *LedgerStore) ExecTransfer(ctx context.Context, req domain.TransferReque
 		var b int64
 		if err := tx.QueryRow(ctx, "SELECT balance FROM accounts WHERE id = $1 FOR UPDATE NOWAIT", id).Scan(&b); err != nil {
 			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // Lock not available
-				return nil, false, ErrConflict
+			if errors.As(err, &pgErr) {
+				switch pgErr.Code {
+				case "55P03", "40001": // lock not available, serialization failure
+					return nil, false, ErrConflict
+				}
 			}
-			return nil, false, ErrAccountNotFound
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, false, ErrAccountNotFound
+			}
+			return nil, false, err
 		}
 	}
 

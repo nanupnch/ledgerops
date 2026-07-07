@@ -4,46 +4,48 @@ import "./styles.css";
 
 const API_BASE = "/api/v1";
 
-const scenarios = [
+const SCENARIOS = [
   {
     id: "normal",
     label: "Normal transfer",
-    detail: "One clean debit and credit pair.",
+    short: "Normal",
+    detail: "Create one balanced debit and credit.",
     icon: "M5 12h14M13 6l6 6-6 6",
+    tone: "blue",
   },
   {
     id: "retry",
     label: "Retry after timeout",
-    detail: "Same key, same payload, second call replays.",
+    short: "Retry",
+    detail: "Submit one key twice and watch replay.",
     icon: "M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5M5 12a7 7 0 0 0 12 5",
+    tone: "green",
   },
   {
     id: "race",
     label: "Opposite direction race",
-    detail: "A to B and B to A under shared locks.",
+    short: "Race",
+    detail: "Run opposing transfers over shared locks.",
     icon: "M7 7h10l-3-3M17 17H7l3 3",
+    tone: "amber",
   },
   {
     id: "hotspot",
     label: "Hot merchant contention",
-    detail: "Many requests hit the same accounts.",
+    short: "Hotspot",
+    detail: "Fire many requests into two hot accounts.",
     icon: "M12 3v18M5 8h14M5 16h14",
+    tone: "red",
   },
   {
     id: "audit",
     label: "Invariant audit",
-    detail: "Ask Postgres what is true now.",
+    short: "Audit",
+    detail: "Check balances, entries, and transfer shape.",
     icon: "M5 13l4 4L19 7",
+    tone: "violet",
   },
 ];
-
-function Icon({ path }) {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className="icon">
-      <path d={path} />
-    </svg>
-  );
-}
 
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -53,8 +55,7 @@ async function api(path, options = {}) {
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    const message = data?.error || `HTTP ${response.status}`;
-    const error = new Error(message);
+    const error = new Error(data?.error || `HTTP ${response.status}`);
     error.status = response.status;
     error.data = data;
     throw error;
@@ -63,14 +64,19 @@ async function api(path, options = {}) {
 }
 
 function money(cents) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format((cents || 0) / 100);
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((Number(cents) || 0) / 100);
 }
 
 function nowKey(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function Icon({ path }) {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d={path} />
+    </svg>
+  );
 }
 
 function App() {
@@ -81,17 +87,20 @@ function App() {
   const [integrity, setIntegrity] = useState(null);
   const [timeline, setTimeline] = useState([]);
   const [activeScenario, setActiveScenario] = useState("normal");
+  const [activeView, setActiveView] = useState("timeline");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("Ready");
+  const [apiOnline, setApiOnline] = useState(false);
   const [form, setForm] = useState({ from: "", to: "", amount: 2500, key: nowKey("manual") });
 
   useEffect(() => {
     refreshAll();
+    checkHealth();
   }, []);
 
   useEffect(() => {
     if (accounts.length >= 2 && (!form.from || !form.to)) {
-      setForm((current) => ({ ...current, from: accounts[0].id, to: accounts[1].id }));
+      setForm((current) => ({ ...current, from: String(accounts[0].id), to: String(accounts[1].id) }));
     }
   }, [accounts, form.from, form.to]);
 
@@ -105,18 +114,26 @@ function App() {
       .catch(() => setSelectedTransfer(null));
   }, [selectedTransferId]);
 
+  async function checkHealth() {
+    try {
+      const response = await fetch("/health");
+      setApiOnline(response.ok);
+    } catch {
+      setApiOnline(false);
+    }
+  }
+
   async function refreshAll() {
     const [accountsResult, transfersResult, integrityResult] = await Promise.allSettled([
       api("/accounts"),
       api("/transfers"),
       api("/integrity"),
     ]);
-    if (accountsResult.status === "fulfilled") setAccounts(accountsResult.value.data);
+    if (accountsResult.status === "fulfilled") setAccounts(accountsResult.value.data || []);
     if (transfersResult.status === "fulfilled") {
-      setTransfers(transfersResult.value.data);
-      if (!selectedTransferId && transfersResult.value.data.length > 0) {
-        setSelectedTransferId(transfersResult.value.data[0].id);
-      }
+      const nextTransfers = transfersResult.value.data || [];
+      setTransfers(nextTransfers);
+      if (!selectedTransferId && nextTransfers.length > 0) setSelectedTransferId(nextTransfers[0].id);
     }
     if (integrityResult.status === "fulfilled") setIntegrity(integrityResult.value.data);
   }
@@ -165,6 +182,10 @@ function App() {
     return seedDemo();
   }
 
+  function appendTimeline(rows) {
+    setTimeline((current) => [...rows, ...current].slice(0, 80));
+  }
+
   async function postTransfer(payload, idempotencyKey, requestId) {
     const started = performance.now();
     try {
@@ -204,12 +225,9 @@ function App() {
     }
   }
 
-  function appendTimeline(rows) {
-    setTimeline((current) => [...rows, ...current].slice(0, 80));
-  }
-
   async function runScenario(id) {
     setActiveScenario(id);
+    setActiveView(id === "audit" ? "audit" : "timeline");
     setBusy(true);
     try {
       const available = await ensureAccounts();
@@ -219,8 +237,7 @@ function App() {
       }
 
       if (id === "normal") {
-        const payload = { from_account_id: available[0].id, to_account_id: available[1].id, amount: 2500 };
-        await postTransfer(payload, nowKey("normal"), "normal-01");
+        await postTransfer({ from_account_id: available[0].id, to_account_id: available[1].id, amount: 2500 }, nowKey("normal"), "normal-01");
         setNotice("Normal transfer created.");
       }
 
@@ -247,10 +264,7 @@ function App() {
       }
 
       if (id === "hotspot") {
-        const { data } = await api("/demo/scenarios/hotspot", {
-          method: "POST",
-          body: JSON.stringify({ count: 32, amount: 100 }),
-        });
+        const { data } = await api("/demo/scenarios/hotspot", { method: "POST", body: JSON.stringify({ count: 32, amount: 100 }) });
         appendTimeline(data.results || []);
         const firstTransfer = (data.results || []).find((row) => row.transfer_id);
         if (firstTransfer) setSelectedTransferId(firstTransfer.transfer_id);
@@ -264,6 +278,7 @@ function App() {
       }
 
       await refreshAll();
+      await checkHealth();
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -275,16 +290,15 @@ function App() {
     event.preventDefault();
     if (!form.from || !form.to) return;
     setBusy(true);
+    setActiveView("timeline");
     try {
-      const payload = {
-        from_account_id: Number(form.from),
-        to_account_id: Number(form.to),
-        amount: Number(form.amount),
-      };
+      const payload = { from_account_id: Number(form.from), to_account_id: Number(form.to), amount: Number(form.amount) };
       await postTransfer(payload, form.key || nowKey("manual"), "manual-01");
       setForm((current) => ({ ...current, key: nowKey("manual") }));
       setNotice("Manual transfer submitted.");
       await refreshAll();
+    } catch (error) {
+      setNotice(error.message);
     } finally {
       setBusy(false);
     }
@@ -296,102 +310,164 @@ function App() {
       if (base[row.status] !== undefined) base[row.status] += 1;
     }
     const attempts = base.created + base.replayed + base.conflict + base.failed;
-    const abortRate = attempts ? Math.round(((base.conflict + base.failed) / attempts) * 100) : 0;
-    return { ...base, abortRate };
+    return { ...base, abortRate: attempts ? Math.round(((base.conflict + base.failed) / attempts) * 100) : 0 };
   }, [timeline]);
 
   return (
     <main className="app-shell">
-      <aside className="scenario-rail" aria-label="Scenario presets">
-        <div className="brand-block">
+      <header className="app-header">
+        <div className="brand-row">
           <div className="brand-mark">LO</div>
           <div>
             <h1>LedgerOps Workbench</h1>
-            <p>Transaction reliability lab</p>
+            <p>Money movement reliability lab</p>
           </div>
         </div>
-
-        <div className="rail-actions">
-          <button className="secondary-button" type="button" onClick={seedDemo} disabled={busy}>Seed</button>
-          <button className="ghost-button" type="button" onClick={resetDemo} disabled={busy}>Reset</button>
+        <div className="header-status" aria-label="System status">
+          <span className={`online-dot ${apiOnline ? "online" : "offline"}`} />
+          <span>{apiOnline ? "API online" : "API offline"}</span>
+          <span className="env-pill">demo</span>
         </div>
+      </header>
 
-        <nav className="scenario-list">
-          {scenarios.map((scenario) => (
-            <button
-              key={scenario.id}
-              type="button"
-              className={`scenario-button ${activeScenario === scenario.id ? "active" : ""}`}
-              onClick={() => runScenario(scenario.id)}
-              disabled={busy}
-            >
-              <Icon path={scenario.icon} />
-              <span>
-                <strong>{scenario.label}</strong>
-                <small>{scenario.detail}</small>
-              </span>
-            </button>
-          ))}
-        </nav>
-      </aside>
-
-      <section className="workbench-core">
-        <header className="topbar">
-          <div>
-            <p className="eyeline">Current lab state</p>
-            <h2>{notice}</h2>
-          </div>
-          <form className="transfer-form" onSubmit={submitManual}>
-            <label>
-              From
-              <select value={form.from} onChange={(event) => setForm({ ...form, from: event.target.value })}>
-                {accounts.map((account) => <option key={account.id} value={account.id}>acct {account.id}</option>)}
-              </select>
-            </label>
-            <label>
-              To
-              <select value={form.to} onChange={(event) => setForm({ ...form, to: event.target.value })}>
-                {accounts.map((account) => <option key={account.id} value={account.id}>acct {account.id}</option>)}
-              </select>
-            </label>
-            <label>
-              Amount
-              <input type="number" min="1" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
-            </label>
-            <label className="key-field">
-              Idempotency key
-              <input value={form.key} onChange={(event) => setForm({ ...form, key: event.target.value })} />
-            </label>
-            <button className="primary-button" type="submit" disabled={busy || accounts.length < 2}>Run</button>
-          </form>
-        </header>
-
-        <Timeline rows={timeline} transfers={transfers} onSelect={setSelectedTransferId} selectedTransferId={selectedTransferId} />
+      <section className="command-strip" aria-label="Scenario presets">
+        {SCENARIOS.map((scenario) => (
+          <ScenarioButton
+            key={scenario.id}
+            scenario={scenario}
+            active={activeScenario === scenario.id}
+            busy={busy}
+            onClick={() => runScenario(scenario.id)}
+          />
+        ))}
       </section>
 
-      <LedgerTruth
-        accounts={accounts}
-        transfers={transfers}
-        selectedTransfer={selectedTransfer}
-        integrity={integrity}
-        onAudit={() => runScenario("audit")}
-        onSelectTransfer={setSelectedTransferId}
-        busy={busy}
-      />
+      <div className="workbench-grid">
+        <aside className="scenario-rail" aria-label="Scenario presets">
+          <div className="rail-head">
+            <span>Scenarios</span>
+            <button className="icon-button" type="button" onClick={refreshAll} aria-label="Refresh ledger state">Refresh</button>
+          </div>
+          <div className="scenario-list">
+            {SCENARIOS.map((scenario) => (
+              <ScenarioButton
+                key={scenario.id}
+                scenario={scenario}
+                active={activeScenario === scenario.id}
+                busy={busy}
+                onClick={() => runScenario(scenario.id)}
+              />
+            ))}
+          </div>
+          <div className="rail-card">
+            <span>API base</span>
+            <strong>127.0.0.1:8080</strong>
+            <small>{apiOnline ? "healthy" : "not responding"}</small>
+          </div>
+        </aside>
 
-      <footer className="counter-strip" aria-label="System counters">
-        <Counter label="successful transfers" value={counters.created} tone="success" />
-        <Counter label="replays" value={counters.replayed} tone="info" />
-        <Counter label="conflicts" value={counters.conflict} tone="warn" />
-        <Counter label="other errors" value={counters.failed} tone="danger" />
-        <Counter label="abort rate" value={`${counters.abortRate}%`} tone="neutral" />
-      </footer>
+        <section className="primary-column">
+          <section className="status-card">
+            <div>
+              <span className="section-kicker">Current lab state</span>
+              <h2>{notice}</h2>
+            </div>
+            <div className="status-actions">
+              <button className="secondary-button" type="button" onClick={seedDemo} disabled={busy}>Seed</button>
+              <button className="ghost-button" type="button" onClick={resetDemo} disabled={busy}>Reset</button>
+            </div>
+          </section>
+
+          <ManualTransfer accounts={accounts} form={form} setForm={setForm} busy={busy} onSubmit={submitManual} />
+
+          <nav className="view-tabs" aria-label="Workbench views">
+            {["timeline", "ledger", "audit"].map((view) => (
+              <button key={view} type="button" className={activeView === view ? "active" : ""} onClick={() => setActiveView(view)}>
+                {view}
+              </button>
+            ))}
+          </nav>
+
+          <Timeline
+            activeView={activeView}
+            rows={timeline}
+            transfers={transfers}
+            selectedTransferId={selectedTransferId}
+            onSelect={(id) => {
+              setSelectedTransferId(id);
+              setActiveView("ledger");
+            }}
+          />
+        </section>
+
+        <LedgerTruth
+          activeView={activeView}
+          accounts={accounts}
+          transfers={transfers}
+          selectedTransfer={selectedTransfer}
+          integrity={integrity}
+          busy={busy}
+          onAudit={() => runScenario("audit")}
+          onSelectTransfer={(id) => {
+            setSelectedTransferId(id);
+            setActiveView("ledger");
+          }}
+        />
+      </div>
+
+      <CounterStrip counters={counters} />
     </main>
   );
 }
 
-function Timeline({ rows, transfers, onSelect, selectedTransferId }) {
-  const fallbackRows = rows.length
+function ScenarioButton({ scenario, active, busy, onClick }) {
+  return (
+    <button type="button" className={`scenario-button ${scenario.tone} ${active ? "active" : ""}`} onClick={onClick} disabled={busy}>
+      <span className="scenario-icon"><Icon path={scenario.icon} /></span>
+      <span>
+        <strong>{scenario.label}</strong>
+        <small>{scenario.detail}</small>
+      </span>
+    </button>
+  );
+}
+
+function ManualTransfer({ accounts, form, setForm, busy, onSubmit }) {
+  return (
+    <section className="manual-panel">
+      <div className="panel-title">
+        <span className="section-kicker">Manual transfer</span>
+        <h3>Send a controlled request</h3>
+      </div>
+      <form className="transfer-form" onSubmit={onSubmit}>
+        <label>
+          From account
+          <select value={form.from} onChange={(event) => setForm({ ...form, from: event.target.value })}>
+            {accounts.map((account) => <option key={account.id} value={account.id}>acct {account.id}</option>)}
+          </select>
+        </label>
+        <label>
+          To account
+          <select value={form.to} onChange={(event) => setForm({ ...form, to: event.target.value })}>
+            {accounts.map((account) => <option key={account.id} value={account.id}>acct {account.id}</option>)}
+          </select>
+        </label>
+        <label>
+          Amount
+          <input type="number" min="1" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
+        </label>
+        <label className="key-field">
+          Idempotency key
+          <input value={form.key} onChange={(event) => setForm({ ...form, key: event.target.value })} />
+        </label>
+        <button className="primary-button" type="submit" disabled={busy || accounts.length < 2}>Send transfer</button>
+      </form>
+    </section>
+  );
+}
+
+function Timeline({ activeView, rows, transfers, selectedTransferId, onSelect }) {
+  const visibleRows = rows.length
     ? rows
     : transfers.slice(0, 18).map((transfer) => ({
         request_id: `db-${transfer.id}`,
@@ -406,28 +482,20 @@ function Timeline({ rows, transfers, onSelect, selectedTransferId }) {
       }));
 
   return (
-    <section className="timeline-panel">
+    <section className={`timeline-panel mobile-pane ${activeView === "timeline" ? "active" : ""}`}>
       <div className="panel-heading">
         <div>
-          <p className="eyeline">Live transaction timeline</p>
+          <span className="section-kicker">Live timeline</span>
           <h3>Requests touching ledger state</h3>
         </div>
-        <span>{fallbackRows.length} visible</span>
+        <span>{visibleRows.length} visible</span>
       </div>
 
-      <div className="timeline-table" role="table" aria-label="Transaction timeline">
-        <div className="timeline-head" role="row">
-          <span>request id</span>
-          <span>idempotency key</span>
-          <span>status</span>
-          <span>route</span>
-          <span>amount</span>
-          <span>duration</span>
-        </div>
-        <div className="timeline-body">
-          {fallbackRows.length === 0 ? (
-            <div className="empty-state">Seed demo accounts or run a scenario to populate the lab.</div>
-          ) : fallbackRows.map((row, index) => (
+      {visibleRows.length === 0 ? (
+        <div className="empty-state">Seed accounts or run a scenario to populate the lab.</div>
+      ) : (
+        <div className="timeline-list" aria-label="Transaction timeline">
+          {visibleRows.map((row, index) => (
             <button
               key={`${row.request_id}-${index}`}
               type="button"
@@ -435,32 +503,35 @@ function Timeline({ rows, transfers, onSelect, selectedTransferId }) {
               onClick={() => row.transfer_id && onSelect(row.transfer_id)}
               disabled={!row.transfer_id}
             >
-              <span className="mono">{row.request_id}</span>
-              <span className="truncate">{row.idempotency_key}</span>
+              <span className="timeline-main">
+                <span className="mono request-id">{row.request_id}</span>
+                <span className="route">acct {row.from_account_id} <b>to</b> acct {row.to_account_id}</span>
+              </span>
               <StatusPill status={row.status} code={row.http_status} />
-              <span className="route">acct {row.from_account_id} <b>to</b> acct {row.to_account_id}</span>
-              <span className="mono">{money(row.amount)}</span>
-              <span className="mono">{row.duration_ms || "-"} ms</span>
+              <span className="timeline-meta">
+                <span className="truncate">{row.idempotency_key}</span>
+                <span className="mono">{money(row.amount)} / {row.duration_ms || "-"} ms</span>
+              </span>
             </button>
           ))}
         </div>
-      </div>
+      )}
     </section>
   );
 }
 
-function LedgerTruth({ accounts, transfers, selectedTransfer, integrity, onAudit, onSelectTransfer, busy }) {
+function LedgerTruth({ activeView, accounts, transfers, selectedTransfer, integrity, busy, onAudit, onSelectTransfer }) {
   return (
-    <aside className="truth-panel" aria-label="Ledger truth">
-      <div className="panel-heading compact">
+    <aside className={`truth-panel mobile-pane ${activeView === "ledger" || activeView === "audit" ? "active" : ""}`} aria-label="Ledger truth">
+      <div className="panel-heading truth-heading">
         <div>
-          <p className="eyeline">Ledger truth</p>
+          <span className="section-kicker">Ledger truth</span>
           <h3>Database enforced state</h3>
         </div>
         <button className="secondary-button small" type="button" onClick={onAudit} disabled={busy}>Audit</button>
       </div>
 
-      <section className="truth-section">
+      <section className="truth-section balances-section">
         <h4>Account balances</h4>
         <div className="balance-list">
           {accounts.length === 0 ? <p className="muted">No accounts loaded.</p> : accounts.map((account) => (
@@ -473,7 +544,7 @@ function LedgerTruth({ accounts, transfers, selectedTransfer, integrity, onAudit
       </section>
 
       <section className="truth-section">
-        <h4>Transfer record</h4>
+        <h4>Selected transfer</h4>
         {selectedTransfer ? (
           <dl className="record-grid">
             <dt>ID</dt><dd className="mono">{selectedTransfer.transfer.id}</dd>
@@ -496,7 +567,7 @@ function LedgerTruth({ accounts, transfers, selectedTransfer, integrity, onAudit
         </div>
       </section>
 
-      <section className="truth-section audit-section">
+      <section className="truth-section audit-card">
         <h4>Invariant result</h4>
         {integrity ? (
           <div className={`audit-result ${integrity.ok ? "pass" : "fail"}`}>
@@ -526,18 +597,28 @@ function LedgerTruth({ accounts, transfers, selectedTransfer, integrity, onAudit
 }
 
 function StatusPill({ status, code }) {
-  return <span className={`status-pill ${status}`}>{status} <em>{code}</em></span>;
+  return <span className={`status-pill ${status}`}>{status}<em>{code}</em></span>;
 }
 
-function Counter({ label, value, tone }) {
+function CounterStrip({ counters }) {
+  const items = [
+    ["successful", counters.created, "success"],
+    ["replays", counters.replayed, "info"],
+    ["conflicts", counters.conflict, "warn"],
+    ["errors", counters.failed, "danger"],
+    ["abort rate", `${counters.abortRate}%`, "neutral"],
+  ];
   return (
-    <div className={`counter ${tone}`}>
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
+    <footer className="counter-strip" aria-label="System counters">
+      {items.map(([label, value, tone]) => (
+        <div className={`counter ${tone}`} key={label}>
+          <strong>{value}</strong>
+          <span>{label}</span>
+        </div>
+      ))}
+    </footer>
   );
 }
 
 createRoot(document.getElementById("root")).render(<App />);
-
 
